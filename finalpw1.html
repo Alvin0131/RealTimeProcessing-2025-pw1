@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0"
+    />
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+
+        margin: 0;
+        overflow: hidden;
+        background-color: #aaaaaa;
+        background-attachment: fixed !important;
+      }
+    </style>
+    <style>
+      body {
+        font-family: Monospace;
+        margin: 0px;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+
+
+    <script id="imgvertShader" type="shader">
+        uniform mat4 modelViewMatrix;
+        uniform mat4 projectionMatrix;
+    
+        precision highp float;
+    
+        in vec3 position;
+    
+        void main() {
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0 );
+          }
+    </script>
+    <script id="anavertShader" type="shader">
+        
+      varying vec2 vUv;
+      void main() {
+          vUv = vec2( uv.x, 1.0-uv.y );
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0 );
+      }
+    </script>
+
+
+
+    
+
+    <script id="fragShader" type="shader">
+      uniform sampler2D videoTexture;
+      uniform mat3 leftMatrix;  
+      uniform mat3 rightMatrix;
+      varying vec2 vUv;
+      
+      void main() {
+          vec2 leftUV = vec2(vUv.x * 0.5, vUv.y);  // Left half of video
+          vec2 rightUV = vec2(vUv.x * 0.5 + 0.5, vUv.y); // Right half of video
+          
+          vec3 leftColor = texture2D(videoTexture, leftUV).rgb;
+          vec3 rightColor = texture2D(videoTexture, rightUV).rgb;
+      
+          // Apply scale factors to control anaglyph effect
+          vec3 leftAnaglyph = leftMatrix * leftColor ;
+          vec3 rightAnaglyph = rightMatrix * rightColor ;
+      
+          // Combine both processed colors
+          vec3 finalColor = leftAnaglyph + rightAnaglyph;
+      
+          gl_FragColor = vec4(finalColor, 1.0);
+      }
+    </script>
+
+    <script id="gaussianFragShader" type="shader">
+        precision highp float;
+        
+        uniform sampler2D image;
+        uniform int kernelSize;
+        uniform float sigma;
+        
+        out vec4 out_FragColor;
+        
+        void main(void) {
+            float sum = 0.0;
+            vec4 color = vec4(0.0);
+            int halfSize = kernelSize / 2;
+            float sigma2 = 2.0 * sigma * sigma;
+            float normalization = 1.0 / (3.141592653589793 * sigma2);
+        
+            for (int i = -halfSize; i <= halfSize; i++) {
+                for (int j = -halfSize; j <= halfSize; j++) {
+                    ivec2 coord = ivec2(int(gl_FragCoord.x) + i, int(gl_FragCoord.y) + j);
+                    if (coord.x >= 0 && coord.x < textureSize(image, 0).x && coord.y >= 0 && coord.y < textureSize(image, 0).y) {
+                        float weight = normalization * exp(-(float(i * i + j * j)) / sigma2);
+                        color += weight * texelFetch(image, coord, 0);
+                        sum += weight;
+                    }
+                }
+            }
+        
+            out_FragColor = color / sum;
+        }
+    </script>
+
+
+    <script id="laplacianFragShader" type="shader">
+        //duplicate the pixels on the border because it works not good with ignore the blank positions
+        precision highp float;
+        
+        uniform sampler2D image;
+        uniform bool useNorm;
+        
+        out vec4 out_FragColor;
+        
+        void main(void) {
+            ivec2 texCoord = ivec2(gl_FragCoord.xy);
+            ivec2 imageSize = textureSize(image, 0);
+        
+            vec4 color = vec4(0.0);
+        
+            // Replicate nearest valid pixel for boundary conditions
+            ivec2 clampedCoord = clamp(texCoord, ivec2(0, 0), imageSize - ivec2(1, 1));
+        
+            // Fetch center pixel (replicated if out of bounds)
+            vec4 center = texelFetch(image, clampedCoord, 0) * -4.0;
+        
+            // Fetch neighboring pixels (replicated if out of bounds)
+            vec4 right  = texelFetch(image, clamp(texCoord + ivec2(1, 0), ivec2(0, 0), imageSize - ivec2(1, 1)), 0);
+            vec4 left   = texelFetch(image, clamp(texCoord - ivec2(1, 0), ivec2(0, 0), imageSize - ivec2(1, 1)), 0);
+            vec4 top    = texelFetch(image, clamp(texCoord + ivec2(0, 1), ivec2(0, 0), imageSize - ivec2(1, 1)), 0);
+            vec4 bottom = texelFetch(image, clamp(texCoord - ivec2(0, 1), ivec2(0, 0), imageSize - ivec2(1, 1)), 0);
+        
+            // Apply Laplacian kernel
+            color = center + right + left + top + bottom;
+        
+            // Optional: Normalize output
+            if (useNorm) {
+                float norm = length(color.rgb);
+                out_FragColor = vec4(vec3(norm), 1.0);
+            } else {
+                out_FragColor = color;
+            }
+        }
+    </script>
+          
+
+
+
+    <script id="separableGaussianFragShader" type="shader">
+    precision highp float;
+    
+    uniform sampler2D image;
+    uniform int kernelSize;
+    uniform float sigma;
+    
+    out vec4 out_FragColor;
+    
+    void main(void) {
+        vec2 texCoord = gl_FragCoord.xy;
+        vec4 color = vec4(0.0);
+        float sum = 0.0;
+        int halfSize = kernelSize / 2;
+        float sigma2 = 2.0 * sigma * sigma;
+        float normalization = 1.0 / (3.141592653589793 * sigma2);
+    
+        // Horizontal pass
+        for (int i = -halfSize; i <= halfSize; i++) {
+            ivec2 coord = ivec2(int(texCoord.x) + i, int(texCoord.y));
+            if (coord.x >= 0 && coord.x < textureSize(image, 0).x) {
+                float weight = normalization * exp(-(float(i * i)) / sigma2);
+                color += weight * texelFetch(image, coord, 0);
+                sum += weight;
+            }
+        }
+        color /= sum;
+    
+        // Vertical pass
+        vec4 finalColor = vec4(0.0);
+        sum = 0.0;
+        for (int j = -halfSize; j <= halfSize; j++) {
+            ivec2 coord = ivec2(int(texCoord.x), int(texCoord.y) + j);
+            if (coord.y >= 0 && coord.y < textureSize(image, 0).y) {
+                float weight = normalization * exp(-(float(j * j)) / sigma2);
+                finalColor += weight * texelFetch(image, coord, 0);
+                sum += weight;
+            }
+        }
+        finalColor /= sum;
+    
+        out_FragColor = finalColor;
+    }
+    </script>
+    <script id="medianFilterFragShader" type="shader">
+        precision highp float;
+        
+        uniform sampler2D image;
+        uniform int kernelSize;
+        
+        out vec4 out_FragColor;
+        
+        void main(void) {
+            vec2 texCoord = gl_FragCoord.xy;
+            int halfSize = kernelSize / 2;
+            vec4 values[121]; // Maximum kernel size of 11x11
+        
+            int count = 0;
+            ivec2 texSize = textureSize(image, 0); // Get image size
+        
+            // Collect pixels, clamping out-of-bounds pixels to the nearest valid coordinate
+            for (int i = -halfSize; i <= halfSize; i++) {
+                for (int j = -halfSize; j <= halfSize; j++) {
+                    ivec2 coord = ivec2(texCoord) + ivec2(i, j);
+                    coord = clamp(coord, ivec2(0, 0), texSize - ivec2(1, 1)); // Clamp to valid range
+                    values[count++] = texelFetch(image, coord, 0);
+                }
+            }
+        
+            // Sort the pixel values based on brightness (luminance)
+            for (int i = 0; i < count - 1; i++) {
+                for (int j = i + 1; j < count; j++) {
+                    float lumI = dot(values[i].rgb, vec3(0.299, 0.587, 0.114));
+                    float lumJ = dot(values[j].rgb, vec3(0.299, 0.587, 0.114));
+                    if (lumI > lumJ) {
+                        vec4 temp = values[i];
+                        values[i] = values[j];
+                        values[j] = temp;
+                    }
+                }
+            }
+        
+            // Select the median pixel
+            out_FragColor = values[count / 2];
+        }
+    </script>
+    <script id="combinedGaussianLaplacianFragShader" type="shader">
+    precision highp float;
+    
+    uniform sampler2D image;
+    uniform int kernelSize;
+    uniform float sigma;
+    uniform float laplacianFactor;
+    
+    out vec4 out_FragColor;
+    
+    void main(void) {
+        vec2 texCoord = gl_FragCoord.xy;
+        vec4 color = vec4(0.0);
+        float sum = 0.0;
+        int halfSize = kernelSize / 2;
+        float sigma2 = 2.0 * sigma * sigma;
+        float normalization = 1.0 / (3.141592653589793 * sigma2);
+        ivec2 texSize = textureSize(image, 0);
+    
+        // Gaussian filter
+        for (int i = -halfSize; i <= halfSize; i++) {
+            for (int j = -halfSize; j <= halfSize; j++) {
+                ivec2 coord = ivec2(texCoord) + ivec2(i, j);
+                coord = clamp(coord, ivec2(0, 0), texSize - ivec2(1, 1)); // Clamp to valid range
+                float weight = normalization * exp(-(float(i * i + j * j)) / sigma2);
+                color += weight * texelFetch(image, coord, 0);
+                sum += weight;
+            }
+        }
+        color /= sum;
+    
+        // Laplacian filter
+        vec4 laplacianColor = -4.0 * texelFetch(image, clamp(ivec2(texCoord), ivec2(0, 0), texSize - ivec2(1, 1)), 0);
+        laplacianColor += texelFetch(image, clamp(ivec2(texCoord) + ivec2(1, 0), ivec2(0, 0), texSize - ivec2(1, 1)), 0);
+        laplacianColor += texelFetch(image, clamp(ivec2(texCoord) - ivec2(1, 0), ivec2(0, 0), texSize - ivec2(1, 1)), 0);
+        laplacianColor += texelFetch(image, clamp(ivec2(texCoord) + ivec2(0, 1), ivec2(0, 0), texSize - ivec2(1, 1)), 0);
+        laplacianColor += texelFetch(image, clamp(ivec2(texCoord) - ivec2(0, 1), ivec2(0, 0), texSize - ivec2(1, 1)), 0);
+    
+        // Combine Gaussian and Laplacian
+        float laplacianNorm = length(laplacianColor.rgb);
+        out_FragColor = color + laplacianFactor * vec4(vec3(laplacianNorm), 1.0);
+    }
+    </script>
+      
+            
+    
+    <script
+      async
+      src="https://unpkg.com/es-module-shims@1.3.6/dist/es-module-shims.js"
+    ></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.172.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.172.0/examples/jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { GUI } from "three/addons/libs/lil-gui.module.min.js";
+    import WEBGL from "three/addons/capabilities/WebGL.js";
+
+
+    function imgIVimageProcessing(height, width, imageProcessingMaterial) {
+        this.height = height;
+        this.width = width;
+        this.material = imageProcessingMaterial;
+
+        //3 rtt setup
+        this.scene = new THREE.Scene();
+        this.orthoCamera = new THREE.OrthographicCamera(
+          -1,
+          1,
+          1,
+          -1,
+          1 / Math.pow(2, 53),
+          1
+        );
+
+
+        //4 create a target texture
+        var options = {
+          minFilter: THREE.NearestFilter,
+          magFilter: THREE.NearestFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.FloatType,
+
+     
+        };
+        this.rtt = new THREE.WebGLRenderTarget(width, height, options);
+
+        var geom = new THREE.BufferGeometry();
+        geom.setAttribute(
+          "position",
+          new THREE.BufferAttribute(
+            new Float32Array([
+              -1, -1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, 1, 1, 0, -1, 1, 0,
+            ]),
+            3
+          )
+        );
+        this.scene.add(new THREE.Mesh(geom, imageProcessingMaterial));
+      }
+
+    function anaIVimageProcessing(height, width, anaglyphMaterial) {
+        this.height = height;
+        this.width = width;
+        this.material = anaglyphMaterial;
+
+        //3 rtt setup
+        this.scene = new THREE.Scene();
+        this.orthoCamera = new THREE.OrthographicCamera(
+            -1,
+            1,
+            1,
+            -1,
+            1 / Math.pow(2, 53),
+            1
+        );
+
+        //4 create a target texture
+        var options = {
+            minFilter: THREE.NearestFilter,
+            magFilter: THREE.NearestFilter,
+            format: THREE.RGBAFormat,
+            //            type:THREE.FloatType
+            type: THREE.UnsignedByteType,
+        };
+        this.rtt = new THREE.WebGLRenderTarget(width, height, options);
+
+        var geom = new THREE.BufferGeometry();
+        geom.setAttribute(
+            "position",
+            new THREE.BufferAttribute(
+            new Float32Array([
+                -1, -1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, 1, 1, 0, -1, 1, 0,
+            ]),
+            3
+            )
+        );
+        geom.setAttribute(
+            "uv",
+            new THREE.BufferAttribute(
+            new Float32Array([0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0]),
+            2
+            )
+        );
+        this.scene.add(new THREE.Mesh(geom, anaglyphMaterial));
+    }
+
+    function imgIVprocess(imageProcessing, renderer) {
+        renderer.setRenderTarget(imageProcessing.rtt);
+        renderer.render(imageProcessing.scene, imageProcessing.orthoCamera);
+        renderer.setRenderTarget(null);
+    }
+    function anaIVprocess(anaglyphProcessing, renderer) {
+        anaglyphProcessing.material.uniforms.videoTexture.value = imageProcessing.rtt.texture;
+
+        renderer.setRenderTarget(anaglyphProcessing.rtt);
+        renderer.render(anaglyphProcessing.scene, anaglyphProcessing.orthoCamera);
+        renderer.setRenderTarget(null);        
+    }
+    var camera, controls, scene, renderer, container;
+    var plan;
+
+    // VIDEO AND THE ASSOCIATED TEXTURE
+    var video, videoTexture;
+
+    var imageProcessing, anaglyphMaterial, imageProcessingMaterial, anaglyphProcessing;
+    var imageProcessingRT, anaglyphRT;
+    var imageProcessingScene, anaglyphScene, finalScene;
+
+
+
+    // GUI
+    var gui;
+    init();
+    animate();
+
+    function init() {
+        container = document.createElement("div");
+        document.body.appendChild(container);
+
+        scene = new THREE.Scene();
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.autoClear = false;
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = false;
+
+        container.appendChild(renderer.domElement);
+
+        camera = new THREE.PerspectiveCamera(
+          75,
+          window.innerWidth / window.innerHeight,
+          0.001,
+          10
+        );
+        camera.position.z = 1.0;
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.minDistance = 0.005;
+        controls.maxDistance = 2.0;
+        controls.enableRotate = true;
+        controls.addEventListener("change", render);
+        controls.update();
+
+        video = document.createElement("video");
+        video.src = "video.mp4";
+        video.load();
+        video.muted = true;
+        video.loop = true;
+
+        video.onloadeddata = function () {
+            videoTexture = new THREE.VideoTexture(video);
+            videoTexture.minFilter = THREE.NearestFilter;
+            videoTexture.magFilter = THREE.NearestFilter;
+            videoTexture.generateMipmaps = false;
+            videoTexture.format = THREE.RGBAFormat;
+
+            var imageProcessingRT = new THREE.WebGLRenderTarget(video.videoWidth, video.videoHeight);
+            var anaglyphRT = new THREE.WebGLRenderTarget(video.videoWidth, video.videoHeight);
+            var imageProcessingScene = new THREE.Scene();
+            var anaglyphScene = new THREE.Scene();
+            var finalScene = new THREE.Scene();
+
+
+            var gaussianMaterial = new THREE.RawShaderMaterial({
+                uniforms: {
+                    kernelSize: { type: "i", value: 5 },
+                    sigma: { type: "f", value: 1.0 },
+                    image: { type: "t", value: videoTexture },
+                },
+                vertexShader: document.getElementById("imgvertShader").text,
+                fragmentShader: document.getElementById("gaussianFragShader").text,
+                glslVersion: THREE.GLSL3,
+            });
+
+            var laplacianMaterial = new THREE.RawShaderMaterial({
+                uniforms: {
+                    useNorm: { type: "b", value: false },
+                    image: { type: "t", value: videoTexture },
+                },
+                vertexShader: document.getElementById("imgvertShader").text,
+                fragmentShader: document.getElementById("laplacianFragShader").text,
+                glslVersion: THREE.GLSL3,
+            });
+
+            var separableGaussianMaterial = new THREE.RawShaderMaterial({
+                uniforms: {
+                    kernelSize: { type: "i", value: 5 },
+                    sigma: { type: "f", value: 1.0 },
+                    image: { type: "t", value: videoTexture },
+                },
+                vertexShader: document.getElementById("imgvertShader").text,
+                fragmentShader: document.getElementById("separableGaussianFragShader").text,
+                glslVersion: THREE.GLSL3,
+            });
+            var medianFilterMaterial = new THREE.RawShaderMaterial({
+                uniforms: {
+                    kernelSize: { type: "i", value: 5 },
+                    image: { type: "t", value: videoTexture },
+                },
+                vertexShader: document.getElementById("imgvertShader").text,
+                fragmentShader: document.getElementById("medianFilterFragShader").text,
+                glslVersion: THREE.GLSL3,
+            });
+
+            var combinedGaussianLaplacianMaterial = new THREE.RawShaderMaterial({
+                uniforms: {
+                    kernelSize: { type: "i", value: 5 },
+                    sigma: { type: "f", value: 1.0 },
+                    laplacianFactor: { type: "f", value: 1.0 },
+                    image: { type: "t", value: videoTexture },
+                },
+                vertexShader: document.getElementById("imgvertShader").text,
+                fragmentShader: document.getElementById("combinedGaussianLaplacianFragShader").text,
+                glslVersion: THREE.GLSL3,
+            });
+
+
+
+            imageProcessingMaterial = gaussianMaterial;
+
+            imageProcessing = new imgIVimageProcessing(
+                video.videoHeight,
+                video.videoWidth,
+                imageProcessingMaterial
+            );
+            var geometry = new THREE.PlaneGeometry(
+                1,
+                video.videoHeight / video.videoWidth
+            );
+            var imgmaterial = new THREE.MeshBasicMaterial({
+                map: imageProcessing.rtt.texture,
+                side: THREE.DoubleSide,
+            });
+
+            imgIVprocess(imageProcessing, renderer);
+
+
+            var anaglyphMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    videoTexture: { type: "t", value: imageProcessing.rtt.texture }, // Input video texture
+                    leftMatrix: { type: "mat3", value: new THREE.Matrix3() }, // Default matrix for left
+                    rightMatrix: { type: "mat3", value: new THREE.Matrix3() }, // Default matrix for right
+                },
+                vertexShader: document.getElementById("anavertShader").text,
+                fragmentShader: document.getElementById("fragShader").text,
+            });
+
+            anaglyphProcessing = new anaIVimageProcessing(
+                video.videoHeight,
+                video.videoWidth,
+                anaglyphMaterial
+            );
+            var anamaterial = new THREE.MeshBasicMaterial({
+                map: anaglyphProcessing.rtt.texture,
+                side: THREE.DoubleSide,
+            });
+           
+            
+
+            var anaglyphMesh = new THREE.Mesh(geometry, anamaterial);
+            anaglyphScene.add(anaglyphMesh);
+
+            var finalMesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map: anaglyphRT.texture }));
+            finalScene.add(finalMesh);
+
+
+
+            var material = new THREE.MeshBasicMaterial({
+                map: anaglyphProcessing.rtt.texture,
+                side: THREE.DoubleSide,
+            });
+            plan = new THREE.Mesh(geometry, material);
+            plan.position.z = 0.15;
+            plan.receiveShadow = false;
+            plan.castShadow = false;
+            scene.add(plan);
+
+            var geometry2 = new THREE.PlaneGeometry(
+                1,
+                video.videoHeight / video.videoWidth
+            );
+            var material2 = new THREE.MeshBasicMaterial({
+                map: videoTexture,
+                side: THREE.DoubleSide,
+            });
+            plan = new THREE.Mesh(geometry2, material2);
+            plan.position.z = -0.15;
+            plan.receiveShadow = false;
+            plan.castShadow = false;
+            scene.add(plan);
+
+            var pausePlayObj = {
+                pausePlay: function () {
+                if (!video.paused) {
+                    console.log("pause");
+                    video.pause();
+                } else {
+                    console.log("play");
+                    video.play();
+                }
+                },
+                add10sec: function () {
+                video.currentTime = video.currentTime + 10;
+                console.log(video.currentTime);
+                },
+            };
+            function setAnaglyphMode(mode) {
+                switch (mode) {
+                    case "true": 
+
+                        anaglyphMaterial.uniforms.leftMatrix.value.set(
+                            0.299, 0.587, 0.114,
+                            0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0
+                        );
+                        anaglyphMaterial.uniforms.rightMatrix.value.set(
+                            0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0,
+                            0.299, 0.587, 0.114
+                        );
+                        break;
+                    case "color": 
+
+                        anaglyphMaterial.uniforms.leftMatrix.value.set(
+                            1.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0
+                        );
+                        anaglyphMaterial.uniforms.rightMatrix.value.set(
+                            0.0, 0.0, 0.0,
+                            0.0, 1.0, 0.0,
+                            0.0, 0.0, 1.0
+                        );
+                        break;
+                    case "gray": 
+
+                        anaglyphMaterial.uniforms.leftMatrix.value.set(
+                            0.299, 0.587, 0.114,
+                            0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0
+                        );
+                        anaglyphMaterial.uniforms.rightMatrix.value.set(
+                            0.0, 0.0, 0.0,
+                            0.299, 0.587, 0.114,
+                            0.299, 0.587, 0.114
+                        );
+                        break;
+                    case "half": 
+
+                        anaglyphMaterial.uniforms.leftMatrix.value.set(
+                            0.299, 0.587, 0.114,
+                            0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0
+                        );
+                        anaglyphMaterial.uniforms.rightMatrix.value.set(
+                            0.0, 0.0, 0.0,
+                            0.0, 1.0, 0.0,
+                            0.0, 0.0, 1.0
+                        );
+                        break;
+                    case "optimized":
+
+                        anaglyphMaterial.uniforms.leftMatrix.value.set(
+                            0.0, 0.7, 0.3,
+                            0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0
+                        );
+                        anaglyphMaterial.uniforms.rightMatrix.value.set(
+                            0.0, 0.0, 0.0,
+                            0.0, 1.0, 0.0,
+                            0.0, 0.0, 1.0
+                        );
+                        break;
+                }
+            }
+
+
+            gui = new GUI();
+            var videoFolder = gui.addFolder("Video");
+            videoFolder.add(pausePlayObj, "pausePlay").name("Pause/Play");
+            videoFolder.add(pausePlayObj, "add10sec").name("Add 10 sec");
+            videoFolder.open();
+            var anaglyphModes = {
+                mode: "true"
+            };
+            setAnaglyphMode(anaglyphModes.mode);
+          
+            videoFolder.add(anaglyphModes, 'mode', ["true", "color", "gray", "half", "optimized"]).name("Anaglyph Mode").onChange(function(value) {
+                setAnaglyphMode(value);
+            });
+            
+
+            
+            // Function to update the GUI based on the selected material
+            function updateGUI(material) {
+                // Clear existing GUI controls
+                gui.destroy();
+                gui = new GUI();
+
+                // Add common controls
+                gui.add(pausePlayObj, "pausePlay").name("Pause/play video");
+                gui.add(pausePlayObj, "add10sec").name("Add 10 seconds");
+
+                // Add material-specific controls
+                switch (material) {
+                    case "gaussianMaterial":
+                        var gaussianFolder = gui.addFolder('Gaussian Filter');
+                        gaussianFolder.add(gaussianMaterial.uniforms.kernelSize, 'value', 1, 21).name('Kernel Size');
+                        gaussianFolder.add(gaussianMaterial.uniforms.sigma, 'value', 0.1, 10.0).name('Sigma');
+                        gaussianFolder.add(anaglyphModes, 'mode', ["true", "color", "gray", "half", "optimized"]).name("Anaglyph Mode").onChange(function(value) {
+                            setAnaglyphMode(value);
+                        });
+                        gaussianFolder.open();
+                        break;
+                    case "laplacianMaterial":
+                        var laplacianFolder = gui.addFolder('Laplacian Filter');
+                        laplacianFolder.add(laplacianMaterial.uniforms.useNorm, 'value').name('Use Norm');
+                        laplacianFolder.add(anaglyphModes, 'mode', ["true", "color", "gray", "half", "optimized"]).name("Anaglyph Mode").onChange(function(value) {setAnaglyphMode(value); });
+                        laplacianFolder.open();
+                        break;
+                    case "separableGaussianMaterial":
+                        var separableGaussianFolder = gui.addFolder('Separable Gaussian Filter');
+                        separableGaussianFolder.add(separableGaussianMaterial.uniforms.kernelSize, 'value', 1, 21).name('Kernel Size');
+                        separableGaussianFolder.add(separableGaussianMaterial.uniforms.sigma, 'value', 0.1, 10.0).name('Sigma');
+                        separableGaussianFolder.add(anaglyphModes, 'mode', ["true", "color", "gray", "half", "optimized"]).name("Anaglyph Mode").onChange(function(value) {setAnaglyphMode(value); });
+
+                        separableGaussianFolder.open();
+                        break;
+                    case "medianFilterMaterial":
+                        var medianFilterFolder = gui.addFolder('Median Filter');
+                        medianFilterFolder.add(medianFilterMaterial.uniforms.kernelSize, 'value', 1, 11).name('Kernel Size');
+                        medianFilterFolder.add(anaglyphModes, 'mode', ["true", "color", "gray", "half", "optimized"]).name("Anaglyph Mode").onChange(function(value) {setAnaglyphMode(value); });
+                        medianFilterFolder.open();
+                        break;
+                    case "combinedGaussianLaplacianMaterial":
+                        var combinedGaussianLaplacianFolder = gui.addFolder('Combined Gaussian Laplacian Filter');
+                        combinedGaussianLaplacianFolder.add(combinedGaussianLaplacianMaterial.uniforms.kernelSize, 'value', 1, 21).name('Kernel Size');
+                        combinedGaussianLaplacianFolder.add(combinedGaussianLaplacianMaterial.uniforms.sigma, 'value', 0.1, 10.0).name('Sigma');
+                        combinedGaussianLaplacianFolder.add(combinedGaussianLaplacianMaterial.uniforms.laplacianFactor, 'value', 0.1, 10.0).name('Laplacian Factor');
+                        combinedGaussianLaplacianFolder.add(anaglyphModes, 'mode', ["true", "color", "gray", "half", "optimized"]).name("Anaglyph Mode").onChange(function(value) {setAnaglyphMode(value); });
+                        combinedGaussianLaplacianFolder.open();
+                        break;  
+
+               
+                }
+
+                // Add material selection control
+                var materialOptions = { material: material };
+                gui.add(materialOptions, "material", [ "gaussianMaterial", "laplacianMaterial", "separableGaussianMaterial", "medianFilterMaterial", "combinedGaussianLaplacianMaterial"]).name("Material")
+                    .onChange(function (value) {
+                        switch (value) {
+                            case "gaussianMaterial":
+                                imageProcessingMaterial = gaussianMaterial;
+                                break;
+                            case "laplacianMaterial":
+                                imageProcessingMaterial = laplacianMaterial;
+                                break;
+                            case "separableGaussianMaterial":
+                                imageProcessingMaterial = separableGaussianMaterial;
+                                break;
+                            case "medianFilterMaterial":
+                                imageProcessingMaterial = medianFilterMaterial;
+                                break;
+                            case "combinedGaussianLaplacianMaterial":
+                                imageProcessingMaterial = combinedGaussianLaplacianMaterial;
+                                break;
+                        }
+                        imageProcessing.scene.children[0].material = imageProcessingMaterial;
+                        imageProcessingMaterial.needsUpdate = true;
+                        updateGUI(value); // Update the GUI based on the new material
+                    });
+            }
+
+            // Initialize the GUI with the initial material
+            updateGUI("gaussianMaterial");
+
+            
+            video.play();
+        };
+
+        window.addEventListener("resize", onWindowResize, false);
+    }
+    
+
+    function render() {
+        if (video.readyState >= video.HAVE_ENOUGH_DATA) {
+            imgIVprocess(imageProcessing, renderer);  // 1st pass: Gaussian blur
+            anaIVprocess(anaglyphProcessing, renderer);  // 2nd pass: Anaglyph effect
+
+            // Render final output to screen
+            renderer.setRenderTarget(null);
+            renderer.render(scene, camera);
+        }
+
+        
+    }
+
+
+    function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        render();
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        render();
+    }
+    </script>
+  </body>
+</html>
